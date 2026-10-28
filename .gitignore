@@ -1,0 +1,8 @@
+/target
+/src-tauri/target
+/src-tauri/gen
+/dist
+/build
+*.AppImage
+/vendor
+dist
