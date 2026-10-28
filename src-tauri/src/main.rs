@@ -11,9 +11,9 @@ use std::{
 
 use tauri::{
     image::Image,
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{TrayIcon, TrayIconBuilder},
-    AppHandle,
+    AppHandle, Manager,
 };
 
 const TEAMS_MANIFEST: &str = "https://teams.cloud.microsoft/manifest.json";
@@ -51,19 +51,44 @@ fn ffpwa(args: &[&str]) -> Command {
     cmd
 }
 
-/// Finds the installed Teams site ID in the private firefoxpwa config.
-fn site_id() -> Option<String> {
-    let raw = fs::read_to_string(data_dir().join("config.json")).ok()?;
-    let cfg: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    cfg["sites"].as_object()?.iter().find_map(|(id, site)| {
-        (site["config"]["document_url"] == TEAMS_DOCUMENT).then(|| id.clone())
-    })
+const DEFAULT_PROFILE: &str = "00000000000000000000000000";
+
+struct Account {
+    site: String,
+    profile: String,
+    name: String,
 }
 
-fn ensure_installed() -> Result<String, String> {
-    if let Some(id) = site_id() {
-        return Ok(id);
-    }
+fn config() -> Option<serde_json::Value> {
+    serde_json::from_str(&fs::read_to_string(data_dir().join("config.json")).ok()?).ok()
+}
+
+/// Every installed Teams site is one account; its profile name is the account name.
+fn accounts() -> Vec<Account> {
+    let Some(cfg) = config() else { return vec![] };
+    let mut list: Vec<Account> = cfg["sites"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, site)| site["config"]["document_url"] == TEAMS_DOCUMENT)
+        .map(|(id, site)| Account {
+            site: id.clone(),
+            profile: site["profile"].as_str().unwrap_or("").to_string(),
+            name: cfg["profiles"][site["profile"].as_str().unwrap_or("")]["name"]
+                .as_str()
+                .unwrap_or("Default")
+                .to_string(),
+        })
+        .collect();
+    list.sort_by(|a, b| a.name.cmp(&b.name));
+    list
+}
+
+fn last_account_path() -> PathBuf {
+    data_dir().join("last-account")
+}
+
+fn ensure_runtime() -> Result<(), String> {
     fs::create_dir_all(data_dir()).map_err(|e| e.to_string())?;
     // The AppImage ships a pre-patched Firefox runtime. It must live on a writable path
     // (firefoxpwa re-patches it on install), so copy it once instead of downloading.
@@ -80,25 +105,96 @@ fn ensure_installed() -> Result<String, String> {
             }
         }
     }
-    let status = ffpwa(&[
+    write_policies();
+    Ok(())
+}
+
+const POLICIES_JSON: &str = r#"{
+  "policies": {
+    "Permissions": {
+      "Notifications": {
+        "Allow": ["https://teams.cloud.microsoft", "https://teams.microsoft.com", "https://teams.live.com"],
+        "BlockNewRequests": false
+      }
+    },
+    "DisableTelemetry": true,
+    "DisableFirefoxStudies": true,
+    "DontCheckDefaultBrowser": true
+  }
+}
+"#;
+
+/// Pre-grants Teams desktop notifications so no permission prompt is needed.
+fn write_policies() {
+    let dir = data_dir().join("runtime/distribution");
+    let _ = fs::create_dir_all(&dir);
+    let _ = fs::write(dir.join("policies.json"), POLICIES_JSON);
+}
+
+/// Installs a Teams site. `None` uses firefoxpwa's shared profile (the first account);
+/// a name creates a dedicated profile so the login, cookies and cache stay separate.
+fn install_account(name: Option<&str>) -> Result<String, String> {
+    ensure_runtime()?;
+    let mut args = vec![
         "site", "install", TEAMS_MANIFEST,
         "--document-url", TEAMS_DOCUMENT,
         "--start-url", TEAMS_START,
         "--name", "Microsoft Teams",
         "--no-system-integration",
-    ])
-    .status()
-    .map_err(|e| format!("cannot run firefoxpwa: {e}"))?;
+    ];
+    let profile;
+    if let Some(name) = name {
+        let status = ffpwa(&["profile", "create", "--name", name])
+            .status()
+            .map_err(|e| format!("cannot run firefoxpwa: {e}"))?;
+        if !status.success() {
+            return Err(format!("firefoxpwa profile create failed: {status}"));
+        }
+        profile = config()
+            .and_then(|c| {
+                c["profiles"].as_object()?.iter().find_map(|(id, p)| (p["name"] == name).then(|| id.clone()))
+            })
+            .ok_or("new profile missing from firefoxpwa config")?;
+        args.extend(["--profile", &profile]);
+    }
+    let before: Vec<String> = accounts().into_iter().map(|a| a.site).collect();
+    let status = ffpwa(&args).status().map_err(|e| format!("cannot run firefoxpwa: {e}"))?;
     if !status.success() {
         return Err(format!("firefoxpwa site install failed: {status}"));
     }
-    site_id().ok_or_else(|| "Teams site missing from firefoxpwa config after install".into())
+    accounts()
+        .into_iter()
+        .map(|a| a.site)
+        .find(|id| !before.contains(id))
+        .ok_or_else(|| "Teams site missing from firefoxpwa config after install".into())
+}
+
+/// Resolves the account to open: the requested one, else the last used, else the first.
+fn ensure_account(wanted: Option<String>) -> Result<String, String> {
+    let list = accounts();
+    let last = fs::read_to_string(last_account_path()).ok().map(|s| s.trim().to_string());
+    let pick = wanted
+        .or(last)
+        .filter(|id| list.iter().any(|a| &a.site == id))
+        .or_else(|| list.first().map(|a| a.site.clone()));
+    match pick {
+        Some(id) => Ok(id),
+        None => install_account(None),
+    }
 }
 
 /// Launching an already running site focuses its existing window.
-fn launch() {
-    match ensure_installed() {
+fn launch(wanted: Option<String>) {
+    match ensure_account(wanted) {
         Ok(id) => {
+            let _ = fs::write(last_account_path(), &id);
+            stop_others(&id);
+            // Relaunching a running site opens a second window and Wayland gives us no way
+            // to raise the first, so leave it alone (the dash icon raises it).
+            if is_running(&id) {
+                return;
+            }
+            write_policies();
             apply_profile_tweaks(&id);
             install_desktop_entry(&id);
             let log = fs::OpenOptions::new().create(true).append(true).open(log_path());
@@ -116,6 +212,11 @@ fn launch() {
     }
 }
 
+/// Value of `--account <site>` from a command line, used by per-account dock shortcuts.
+fn account_arg(argv: &[String]) -> Option<String> {
+    argv.iter().position(|a| a == "--account").and_then(|i| argv.get(i + 1).cloned())
+}
+
 const USER_JS: &str = r#"user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);
 user_pref("ui.key.menuAccessKeyFocuses", false);
 user_pref("media.navigator.permission.disabled", true);
@@ -125,12 +226,32 @@ user_pref("permissions.default.desktop-notification", 1);
 user_pref("privacy.webrtc.legacyGlobalIndicator", false);
 user_pref("privacy.webrtc.hideGlobalIndicator", true);
 user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.startup.page", 0);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("browser.sessionstore.restore_on_demand", false);
+user_pref("browser.sessionstore.max_tabs_undo", 0);
+user_pref("browser.sessionstore.max_windows_undo", 0);
+user_pref("browser.sessionstore.warnOnQuit", false);
+user_pref("browser.warnOnQuit", false);
+user_pref("browser.startup.couldRestoreSession.count", -1);
+user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+user_pref("toolkit.telemetry.enabled", false);
+user_pref("toolkit.telemetry.unified", false);
+user_pref("browser.newtabpage.activity-stream.feeds.telemetry", false);
+user_pref("browser.newtabpage.activity-stream.telemetry", false);
+user_pref("browser.warnOnQuitShortcut", false);
+user_pref("browser.tabs.warnOnClose", false);
+user_pref("media.getdisplaymedia.previews.enabled", false);
 "#;
 
 const USER_CHROME_CSS: &str = "\
 #nav-bar, #toolbar-menubar, #PersonalToolbar, #sidebar-main { visibility: collapse !important; }
 #TabsToolbar > *:not(.titlebar-buttonbox-container) { visibility: collapse !important; }
 #TabsToolbar { display: flex !important; }
+.notificationbox-stack, #tab-notification-deck { display: none !important; }
 #TabsToolbar .titlebar-buttonbox-container { order: 100 !important; margin-inline-start: auto !important; }
 ";
 
@@ -147,6 +268,7 @@ fn apply_profile_tweaks(site: &str) {
 
 /// Gives the window a dock/taskbar identity: GNOME matches the window class to a .desktop file.
 fn install_desktop_entry(site: &str) {
+    let name = accounts().into_iter().find(|a| a.site == site).map(|a| a.name).unwrap_or_default();
     let Some(appdir) = std::env::var_os("APPDIR") else { return };
     let icon = data_dir().join("teams.png");
     let _ = fs::copy(PathBuf::from(appdir).join("usr/lib/teams-for-linux/teams.png"), &icon);
@@ -160,16 +282,31 @@ fn install_desktop_entry(site: &str) {
     let _ = fs::write(
         dir.join(format!("FFPWA-{site}.desktop")),
         format!(
-            "[Desktop Entry]\nType=Application\nName=Microsoft Teams\nComment=Teams for Linux\nExec=\"{exe}\"\nIcon={}\nCategories=Network;InstantMessaging;\nStartupWMClass=FFPWA-{site}\nTerminal=false\n",
+            "[Desktop Entry]\nType=Application\nName=Microsoft Teams ({name})\nComment=Teams for Linux\nExec=\"{exe}\" --account {site}\nIcon={}\nCategories=Network;InstantMessaging;\nStartupWMClass=FFPWA-{site}\nTerminal=false\n",
             icon.display()
         ),
     );
 }
 
+fn is_running(site: &str) -> bool {
+    let pattern = format!("teams-for-linux/runtime/firefox.*FFPWA-{site}");
+    Command::new("pgrep").args(["-f", "--", &pattern]).output().map_or(false, |o| o.status.success())
+}
+
+/// Keeps a single window: stops every account except `keep` before opening it.
+fn stop_others(keep: &str) {
+    for account in accounts().into_iter().filter(|a| a.site != keep) {
+        let pattern = format!("teams-for-linux/runtime/firefox.*FFPWA-{}", account.site);
+        if Command::new("pkill").args(["-f", "--", &pattern]).status().map_or(false, |s| s.success()) {
+            thread::sleep(std::time::Duration::from_millis(1500));
+        }
+    }
+}
+
 fn stop() {
-    if let Some(id) = site_id() {
+    for account in accounts() {
         // Match our private runtime only; the system Firefox and other PWAs must survive.
-        let pattern = format!("teams-for-linux/runtime/firefox.*FFPWA-{id}");
+        let pattern = format!("teams-for-linux/runtime/firefox.*FFPWA-{}", account.site);
         let _ = Command::new("pkill").args(["-f", "--", &pattern]).status();
     }
 }
@@ -252,11 +389,126 @@ fn listen_for_unread(app: AppHandle) {
     });
 }
 
+/// Rebuilds the account list: one entry per account (last used marked) plus "Add account…".
+fn fill_accounts_menu<R: tauri::Runtime>(menu: &Submenu<R>, app: &impl Manager<R>) {
+    if let Ok(items) = menu.items() {
+        for item in items {
+            let _ = menu.remove(&item);
+        }
+    }
+    let last = fs::read_to_string(last_account_path()).unwrap_or_default();
+    for account in accounts() {
+        let label = if account.site == last.trim() { format!("● {}", account.name) } else { account.name.clone() };
+        if let Ok(item) = MenuItem::with_id(app, format!("acct:{}", account.site), label, true, None::<&str>) {
+            let _ = menu.append(&item);
+        }
+    }
+    if let Ok(sep) = PredefinedMenuItem::separator(app) {
+        let _ = menu.append(&sep);
+    }
+    for (id, label) in [("add_account", "Add account…"), ("rename_account", "Rename account…"), ("remove_account", "Remove account…")] {
+        if let Ok(item) = MenuItem::with_id(app, id, label, true, None::<&str>) {
+            let _ = menu.append(&item);
+        }
+    }
+}
+
+/// Asks for a name with zenity, then creates a dedicated profile + Teams site and opens it.
+fn add_account(app: AppHandle, submenu: Submenu<tauri::Wry>) {
+    thread::spawn(move || {
+        let out = Command::new("zenity")
+            .args(["--entry", "--title=Add Teams account", "--text=Account name (e.g. Work, Client A):"])
+            .output();
+        let name = match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => return,
+        };
+        if name.is_empty() || accounts().iter().any(|a| a.name.eq_ignore_ascii_case(&name)) {
+            return;
+        }
+        match install_account(Some(&name)) {
+            Ok(id) => {
+                launch(Some(id));
+                fill_accounts_menu(&submenu, &app);
+            }
+            Err(e) => eprintln!("{e}"),
+        }
+    });
+}
+
+/// Lets the user pick one of the non-default accounts (the default one can't be changed).
+fn pick_account(title: &str) -> Option<Account> {
+    let list: Vec<Account> = accounts().into_iter().filter(|a| a.profile != DEFAULT_PROFILE).collect();
+    if list.is_empty() {
+        let _ = Command::new("zenity")
+            .args(["--info", "--text=There are no extra accounts yet. The default account can't be changed."])
+            .status();
+        return None;
+    }
+    let mut cmd = Command::new("zenity");
+    cmd.args(["--list", "--title", title, "--column=Account", "--hide-header"]);
+    for a in &list {
+        cmd.arg(&a.name);
+    }
+    let out = cmd.output().ok().filter(|o| o.status.success())?;
+    let chosen = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    list.into_iter().find(|a| a.name == chosen)
+}
+
+fn rename_account(app: AppHandle, submenu: Submenu<tauri::Wry>) {
+    thread::spawn(move || {
+        let Some(account) = pick_account("Rename account") else { return };
+        let Ok(out) = Command::new("zenity")
+            .args(["--entry", "--title=Rename account", "--text=New name:", "--entry-text", &account.name])
+            .output()
+        else {
+            return;
+        };
+        let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !out.status.success()
+            || name.is_empty()
+            || accounts().iter().any(|a| a.profile != account.profile && a.name.eq_ignore_ascii_case(&name))
+        {
+            return;
+        }
+        let _ = ffpwa(&["profile", "update", &account.profile, "--name", &name]).status();
+        install_desktop_entry(&account.site);
+        fill_accounts_menu(&submenu, &app);
+    });
+}
+
+fn remove_account(app: AppHandle, submenu: Submenu<tauri::Wry>) {
+    thread::spawn(move || {
+        let Some(account) = pick_account("Remove account") else { return };
+        let confirmed = Command::new("zenity")
+            .args(["--question", "--title=Remove account", "--text"])
+            .arg(format!("Remove \"{}\"? Its login and data will be deleted.", account.name))
+            .status()
+            .map_or(false, |s| s.success());
+        if !confirmed {
+            return;
+        }
+        let pattern = format!("teams-for-linux/runtime/firefox.*FFPWA-{}", account.site);
+        let _ = Command::new("pkill").args(["-f", "--", &pattern]).status();
+        thread::sleep(std::time::Duration::from_millis(1500));
+        let _ = ffpwa(&["profile", "remove", &account.profile, "--quiet"]).status();
+        if let Some(dir) = dirs::data_dir() {
+            let _ = fs::remove_file(dir.join(format!("applications/FFPWA-{}.desktop", account.site)));
+        }
+        if fs::read_to_string(last_account_path()).map_or(false, |l| l.trim() == account.site) {
+            let _ = fs::remove_file(last_account_path());
+        }
+        fill_accounts_menu(&submenu, &app);
+    });
+}
+
 fn main() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|_, _, _| launch()))
+        .plugin(tauri_plugin_single_instance::init(|_, argv, _| launch(account_arg(&argv))))
         .setup(|app| {
             let show = MenuItem::with_id(app, "show", "Show Teams", true, None::<&str>)?;
+            let accounts_menu = Submenu::with_id(app, "accounts", "Accounts", true)?;
+            fill_accounts_menu(&accounts_menu, app);
             let autostart = CheckMenuItem::with_id(
                 app, "autostart", "Launch on login", true, autostart_path().exists(), None::<&str>,
             )?;
@@ -264,20 +516,28 @@ fn main() {
                 app, "minimized", "Start minimized (tray only)", true, start_minimized_path().exists(), None::<&str>,
             )?;
             let logs = MenuItem::with_id(app, "logs", "Open logs", true, None::<&str>)?;
-            let reset = MenuItem::with_id(app, "reset", "Reset profile…", true, None::<&str>)?;
+            let reset = MenuItem::with_id(app, "reset", "Reset all accounts…", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(
                 app,
-                &[&show, &PredefinedMenuItem::separator(app)?, &autostart, &minimized, &logs, &reset,
+                &[&show, &accounts_menu, &PredefinedMenuItem::separator(app)?, &autostart, &minimized, &logs, &reset,
                   &PredefinedMenuItem::separator(app)?, &quit],
             )?;
 
+            let submenu = accounts_menu.clone();
             TrayIconBuilder::with_id("main")
                 .icon(Image::from_bytes(include_bytes!("../icons/tray.png"))?)
                 .tooltip("Teams")
                 .menu(&menu)
                 .on_menu_event(move |app, event| match event.id.as_ref() {
-                    "show" => launch(),
+                    "show" => launch(None),
+                    "add_account" => add_account(app.clone(), submenu.clone()),
+                    "rename_account" => rename_account(app.clone(), submenu.clone()),
+                    "remove_account" => remove_account(app.clone(), submenu.clone()),
+                    id if id.starts_with("acct:") => {
+                        launch(Some(id["acct:".len()..].to_string()));
+                        fill_accounts_menu(&submenu, app);
+                    }
                     "autostart" => set_autostart(!autostart_path().exists()),
                     "minimized" => set_start_minimized(!start_minimized_path().exists()),
                     "logs" => {
@@ -287,7 +547,9 @@ fn main() {
                         stop();
                         let _ = fs::remove_dir_all(data_dir().join("profiles"));
                         let _ = fs::remove_file(data_dir().join("config.json"));
-                        launch();
+                        let _ = fs::remove_file(last_account_path());
+                        launch(None);
+                        fill_accounts_menu(&submenu, app);
                     }
                     "quit" => {
                         stop();
@@ -298,9 +560,11 @@ fn main() {
                 .build(app)?;
 
             listen_for_unread(app.handle().clone());
-            let autostarted = std::env::args().any(|a| a == "--autostart");
+            let argv: Vec<String> = std::env::args().collect();
+            let autostarted = argv.iter().any(|a| a == "--autostart");
             if !(autostarted && start_minimized_path().exists()) {
-                launch();
+                launch(account_arg(&argv));
+                fill_accounts_menu(&accounts_menu, app);
             }
             Ok(())
         })
