@@ -66,6 +66,7 @@ fn config() -> Option<serde_json::Value> {
 /// Every installed Teams site is one account; its profile name is the account name.
 fn accounts() -> Vec<Account> {
     let Some(cfg) = config() else { return vec![] };
+    let labels = load_labels();
     let mut list: Vec<Account> = cfg["sites"]
         .as_object()
         .into_iter()
@@ -74,14 +75,56 @@ fn accounts() -> Vec<Account> {
         .map(|(id, site)| Account {
             site: id.clone(),
             profile: site["profile"].as_str().unwrap_or("").to_string(),
-            name: cfg["profiles"][site["profile"].as_str().unwrap_or("")]["name"]
-                .as_str()
+            name: labels
+                .get(site["profile"].as_str().unwrap_or(""))
+                .and_then(|e| e["name"].as_str())
+                .or_else(|| cfg["profiles"][site["profile"].as_str().unwrap_or("")]["name"].as_str())
                 .unwrap_or("Default")
                 .to_string(),
         })
         .collect();
     list.sort_by(|a, b| a.name.cmp(&b.name));
     list
+}
+
+/// Display names, kept by us rather than in firefoxpwa so the default profile can be named too.
+/// profile id -> {"name": shown name, "email": address the name was last derived from}
+fn labels_path() -> PathBuf {
+    data_dir().join("labels.json")
+}
+
+fn load_labels() -> serde_json::Map<String, serde_json::Value> {
+    fs::read_to_string(labels_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn save_label(profile: &str, name: &str, email: Option<&str>) {
+    let mut labels = load_labels();
+    let mut entry = labels.get(profile).cloned().unwrap_or_else(|| serde_json::json!({}));
+    entry["name"] = name.into();
+    if let Some(email) = email {
+        entry["email"] = email.into();
+    }
+    labels.insert(profile.to_string(), entry);
+    let _ = fs::write(labels_path(), serde_json::Value::Object(labels).to_string());
+}
+
+/// Called with the address Teams is signed in with. The account is renamed to it once per
+/// sign-in identity, so the name always follows the signed-in address.
+fn account_signed_in(profile: &str, email: &str) {
+    let known = load_labels();
+    if known.get(profile).and_then(|e| e["email"].as_str()) == Some(email) {
+        return;
+    }
+    if accounts().iter().any(|a| a.profile != profile && a.name.eq_ignore_ascii_case(email)) {
+        return;
+    }
+    save_label(profile, email, Some(email));
+    if let Some(account) = accounts().into_iter().find(|a| a.profile == profile) {
+        install_desktop_entry(&account.site);
+    }
 }
 
 fn last_account_path() -> PathBuf {
@@ -233,6 +276,16 @@ user_pref("browser.sessionstore.max_tabs_undo", 0);
 user_pref("browser.sessionstore.max_windows_undo", 0);
 user_pref("browser.sessionstore.warnOnQuit", false);
 user_pref("browser.warnOnQuit", false);
+user_pref("network.cookie.cookieBehavior", 0);
+user_pref("privacy.partition.network_state", false);
+user_pref("privacy.trackingprotection.enabled", false);
+user_pref("privacy.trackingprotection.socialtracking.enabled", false);
+user_pref("privacy.trackingprotection.cryptomining.enabled", false);
+user_pref("privacy.trackingprotection.fingerprinting.enabled", false);
+user_pref("network.cookie.sameSite.laxByDefault", false);
+user_pref("firefoxpwa.openOutOfScopeInDefaultBrowser", true);
+user_pref("firefoxpwa.allowedDomains", "*.cloud.microsoft,*.microsoft.com,*.microsoftonline.com,*.microsoftonline-p.com,*.live.com,*.office.com,*.office365.com,*.microsoft365.com,*.outlook.com,*.msauth.net,*.msftauth.net,login.windows.net");
+user_pref("browser.dom.window.dump.enabled", true);
 user_pref("browser.startup.couldRestoreSession.count", -1);
 user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);
 user_pref("datareporting.policy.dataSubmissionEnabled", false);
@@ -246,6 +299,9 @@ user_pref("browser.warnOnQuitShortcut", false);
 user_pref("browser.tabs.warnOnClose", false);
 user_pref("media.getdisplaymedia.previews.enabled", false);
 "#;
+
+/// Reports the unread count from the window title to the tray (see profile/boot.sys.mjs).
+const BOOT_JS: &str = include_str!("../../profile/boot.sys.mjs");
 
 const USER_CHROME_CSS: &str = "\
 #nav-bar, #toolbar-menubar, #PersonalToolbar, #sidebar-main { visibility: collapse !important; }
@@ -264,6 +320,8 @@ fn apply_profile_tweaks(site: &str) {
     let _ = fs::create_dir_all(dir.join("chrome"));
     let _ = fs::write(dir.join("user.js"), USER_JS);
     let _ = fs::write(dir.join("chrome/userChrome.css"), USER_CHROME_CSS);
+    let _ = fs::create_dir_all(dir.join("chrome/user"));
+    let _ = fs::write(dir.join("chrome/user/boot.sys.mjs"), BOOT_JS);
 }
 
 /// Gives the window a dock/taskbar identity: GNOME matches the window class to a .desktop file.
@@ -364,6 +422,8 @@ fn set_unread(tray: &TrayIcon, count: u32) {
 }
 
 /// Minimal HTTP endpoint: the extension POSTs the unread count as the request body.
+static ACCOUNTS_MENU: std::sync::OnceLock<Submenu<tauri::Wry>> = std::sync::OnceLock::new();
+
 fn listen_for_unread(app: AppHandle) {
     thread::spawn(move || {
         let Ok(listener) = TcpListener::bind(("127.0.0.1", UNREAD_PORT)) else {
@@ -371,19 +431,47 @@ fn listen_for_unread(app: AppHandle) {
             return;
         };
         for mut stream in listener.incoming().flatten() {
-            let mut buf = [0u8; 2048];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]);
-            let count = req
-                .split("\r\n\r\n")
-                .nth(1)
-                .and_then(|b| b.trim().parse::<u32>().ok())
-                .unwrap_or(0);
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+            // The body can arrive in a later segment than the headers; read until it is complete.
+            let mut req = Vec::new();
+            let mut buf = [0u8; 1024];
+            while let Ok(n) = stream.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                req.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&req);
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let wanted = head
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                        .unwrap_or(0);
+                    if body.len() >= wanted {
+                        break;
+                    }
+                }
+            }
+            let req = String::from_utf8_lossy(&req);
+            let path = req.split_whitespace().nth(1).unwrap_or("").to_string();
+            let body = req.split("\r\n\r\n").nth(1).unwrap_or("").trim().to_string();
             let _ = stream.write_all(
                 b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n",
             );
-            if let Some(tray) = app.tray_by_id("main") {
-                set_unread(&tray, count);
+            if path == "/account" {
+                // Body: "<profile id>\n<email>"
+                if let Some((profile, email)) = body.split_once('\n') {
+                    eprintln!("signed in: {email}");
+                    account_signed_in(profile.trim(), email.trim());
+                    if let Some(menu) = ACCOUNTS_MENU.get() {
+                        fill_accounts_menu(menu, &app);
+                    }
+                }
+            } else {
+                let count = body.parse::<u32>().unwrap_or(0);
+                eprintln!("unread count: {count}");
+                if let Some(tray) = app.tray_by_id("main") {
+                    set_unread(&tray, count);
+                }
             }
         }
     });
@@ -406,25 +494,23 @@ fn fill_accounts_menu<R: tauri::Runtime>(menu: &Submenu<R>, app: &impl Manager<R
     if let Ok(sep) = PredefinedMenuItem::separator(app) {
         let _ = menu.append(&sep);
     }
-    for (id, label) in [("add_account", "Add account…"), ("rename_account", "Rename account…"), ("remove_account", "Remove account…")] {
+    for (id, label) in [("add_account", "Add account…"), ("remove_account", "Remove account…")] {
         if let Ok(item) = MenuItem::with_id(app, id, label, true, None::<&str>) {
             let _ = menu.append(&item);
         }
     }
 }
 
-/// Asks for a name with zenity, then creates a dedicated profile + Teams site and opens it.
+/// Creates a dedicated profile + Teams site and opens it. The placeholder name is replaced
+/// by the signed-in email once the user has logged in.
 fn add_account(app: AppHandle, submenu: Submenu<tauri::Wry>) {
     thread::spawn(move || {
-        let out = Command::new("zenity")
-            .args(["--entry", "--title=Add Teams account", "--text=Account name (e.g. Work, Client A):"])
-            .output();
-        let name = match out {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            _ => return,
-        };
-        if name.is_empty() || accounts().iter().any(|a| a.name.eq_ignore_ascii_case(&name)) {
-            return;
+        let existing = accounts();
+        let mut name = "New account".to_string();
+        let mut n = 2;
+        while existing.iter().any(|a| a.name.eq_ignore_ascii_case(&name)) {
+            name = format!("New account {n}");
+            n += 1;
         }
         match install_account(Some(&name)) {
             Ok(id) => {
@@ -455,28 +541,6 @@ fn pick_account(title: &str) -> Option<Account> {
     list.into_iter().find(|a| a.name == chosen)
 }
 
-fn rename_account(app: AppHandle, submenu: Submenu<tauri::Wry>) {
-    thread::spawn(move || {
-        let Some(account) = pick_account("Rename account") else { return };
-        let Ok(out) = Command::new("zenity")
-            .args(["--entry", "--title=Rename account", "--text=New name:", "--entry-text", &account.name])
-            .output()
-        else {
-            return;
-        };
-        let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !out.status.success()
-            || name.is_empty()
-            || accounts().iter().any(|a| a.profile != account.profile && a.name.eq_ignore_ascii_case(&name))
-        {
-            return;
-        }
-        let _ = ffpwa(&["profile", "update", &account.profile, "--name", &name]).status();
-        install_desktop_entry(&account.site);
-        fill_accounts_menu(&submenu, &app);
-    });
-}
-
 fn remove_account(app: AppHandle, submenu: Submenu<tauri::Wry>) {
     thread::spawn(move || {
         let Some(account) = pick_account("Remove account") else { return };
@@ -492,6 +556,9 @@ fn remove_account(app: AppHandle, submenu: Submenu<tauri::Wry>) {
         let _ = Command::new("pkill").args(["-f", "--", &pattern]).status();
         thread::sleep(std::time::Duration::from_millis(1500));
         let _ = ffpwa(&["profile", "remove", &account.profile, "--quiet"]).status();
+        let mut labels = load_labels();
+        labels.remove(&account.profile);
+        let _ = fs::write(labels_path(), serde_json::Value::Object(labels).to_string());
         if let Some(dir) = dirs::data_dir() {
             let _ = fs::remove_file(dir.join(format!("applications/FFPWA-{}.desktop", account.site)));
         }
@@ -525,6 +592,7 @@ fn main() {
             )?;
 
             let submenu = accounts_menu.clone();
+            let _ = ACCOUNTS_MENU.set(accounts_menu.clone());
             TrayIconBuilder::with_id("main")
                 .icon(Image::from_bytes(include_bytes!("../icons/tray.png"))?)
                 .tooltip("Teams")
@@ -532,7 +600,6 @@ fn main() {
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "show" => launch(None),
                     "add_account" => add_account(app.clone(), submenu.clone()),
-                    "rename_account" => rename_account(app.clone(), submenu.clone()),
                     "remove_account" => remove_account(app.clone(), submenu.clone()),
                     id if id.starts_with("acct:") => {
                         launch(Some(id["acct:".len()..].to_string()));
@@ -548,6 +615,7 @@ fn main() {
                         let _ = fs::remove_dir_all(data_dir().join("profiles"));
                         let _ = fs::remove_file(data_dir().join("config.json"));
                         let _ = fs::remove_file(last_account_path());
+                        let _ = fs::remove_file(labels_path());
                         launch(None);
                         fill_accounts_menu(&submenu, app);
                     }
