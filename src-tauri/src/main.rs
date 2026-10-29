@@ -297,7 +297,6 @@ user_pref("browser.newtabpage.activity-stream.feeds.telemetry", false);
 user_pref("browser.newtabpage.activity-stream.telemetry", false);
 user_pref("browser.warnOnQuitShortcut", false);
 user_pref("browser.tabs.warnOnClose", false);
-user_pref("media.getdisplaymedia.previews.enabled", false);
 "#;
 
 /// Reports the unread count from the window title to the tray (see profile/boot.sys.mjs).
