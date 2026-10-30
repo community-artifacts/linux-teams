@@ -5,15 +5,15 @@ Microsoft Teams as a standalone Linux app. It runs Teams in a clean Firefox wind
 Building from source: see [DEVELOPMENT.md](DEVELOPMENT.md). Version history: [CHANGELOG.md](CHANGELOG.md).
 
 ## Install
-1. Download `Teams_for_Linux-x86_64.AppImage` (and the `.sha256` file) from the [latest release](https://github.com/community-artifacts/linux-teams/releases/latest).
-2. Optionally verify it: `sha256sum -c Teams_for_Linux-x86_64.AppImage.sha256`.
-3. Make it executable and run it:
-   ```bash
-   chmod +x Teams_for_Linux-x86_64.AppImage
-   ./Teams_for_Linux-x86_64.AppImage
-   ```
+One command installs the prerequisites, downloads the latest AppImage, verifies its checksum, installs it to `~/.local/opt/teams-for-linux/` and starts it:
+```bash
+curl -fsSL https://raw.githubusercontent.com/community-artifacts/linux-teams/main/install.sh | bash
+```
+Add `-s -- --no-run` after `bash` to install without starting it. Running the same command again updates the app.
 
-Requirements: x86_64 Linux, `libfuse2` (to run AppImages) and `zenity` (for the tray's dialogs). On Ubuntu: `sudo apt install libfuse2 zenity`.
+The script needs x86_64 Linux and `curl`. It installs `libfuse2` (to run AppImages) and `zenity` (for the tray's dialogs) with `apt`, `dnf`, `pacman` or `zypper` when they are missing, using `sudo`. Run it as your normal user.
+
+**Manual install:** download `Teams_for_Linux-x86_64.AppImage` and its `.sha256` from the [latest release](https://github.com/community-artifacts/linux-teams/releases/latest), check it with `sha256sum -c`, then `chmod +x` and run it. Install `libfuse2` and `zenity` yourself.
 
 On GNOME the tray icon needs the **AppIndicator and KStatusNotifierItem Support** extension. Without it the app still works, but there is no tray menu.
 
@@ -50,7 +50,7 @@ The tray icon changes when you have unread messages.
 | `~/.local/share/applications/FFPWA-*.desktop` | Dock and menu entry per account |
 | `~/.config/autostart/teams-for-linux.desktop` | "Launch on login" |
 
-To uninstall, delete the AppImage and these paths.
+To uninstall, delete `~/.local/opt/teams-for-linux/` and these paths.
 
 ## Troubleshooting
 - **Nothing happens when I start it** — it is probably already running (single instance). Use the tray icon or the dash icon, or run `pkill teams-tray` and start again.

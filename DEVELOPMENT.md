@@ -7,6 +7,7 @@ How to build, run and release the app from source. For using the app, see the [R
 - `profile/boot.sys.mjs` — privileged script written into each Firefox profile (`chrome/user/`). It polls the window title for `(N)` and reports the unread count to the tray over `127.0.0.1:47653`, grants Teams notifications, and reads the signed-in email. No extension, so no signing needed.
 - `scripts/build-appimage.sh` — builds the tray with `cargo tauri build`, then injects firefoxpwa, the connector and the Firefox runtime into the AppImage (`dist/`).
 - `ui/` — placeholder frontend required by Tauri (the app has no window).
+- `install.sh` — one-line installer for end users (prerequisites + latest release AppImage). Test it without a release with `TEAMS_BASE_URL=file:///dir/with/appimage INSTALL_DIR=/tmp/x ./install.sh --no-run`.
 - `.github/workflows/release.yml` — release build.
 
 Each launch rewrites the profile's `user.js`, `userChrome.css` (hides toolbar/menus, window buttons on the right) and `policies.json`.
