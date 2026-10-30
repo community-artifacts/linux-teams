@@ -29,6 +29,7 @@ cp -r /usr/share/firefoxpwa/userchrome "$LIB/sysdata/"
 cp -a "$SRC_RUNTIME" "$LIB/runtime"
 curl -fsSL -o "$LIB/teams.png" https://teams.public.onecdn.static.microsoft/evergreen-assets/icons/windows/teams-icon-pwa-v2025-256.png
 
+chmod -R a+rX "$APPDIR"
 mkdir -p "$OUT"
 ARCH=x86_64 "$APPIMAGETOOL" "$APPDIR" "$OUT/Teams_for_Linux-x86_64.AppImage"
 echo "built: $OUT/Teams_for_Linux-x86_64.AppImage"
