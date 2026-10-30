@@ -1,80 +1,64 @@
-# teams-for-linux (firefoxpwa edition)
+# Teams for Linux (firefoxpwa edition)
 
-Standalone Linux app that runs Microsoft Teams through [firefoxpwa](https://github.com/filips123/PWAsForFirefox), with a Tauri tray menu. It ships as one AppImage that bundles firefoxpwa, its connector and a pre-patched Firefox runtime, so end users install nothing else.
+Microsoft Teams as a standalone Linux app. It runs Teams in a clean Firefox window (no address bar or menus) through [firefoxpwa](https://github.com/filips123/PWAsForFirefox), with a tray icon. Everything it needs is inside one AppImage.
 
-## Repository layout
-- `src-tauri/` — Tauri (Rust) tray launcher, no window. Uses a private firefoxpwa dir (`~/.local/share/teams-for-linux`).
-- `profile/boot.sys.mjs` — privileged script written into each Firefox profile (`chrome/user/`). It polls the window title for `(N)` and reports the unread count to the tray over `127.0.0.1:47653`, grants Teams notifications, and reads the signed-in email. No extension, so no signing needed.
-- `scripts/build-appimage.sh` — builds the tray with `cargo tauri build`, then injects firefoxpwa, the connector and the Firefox runtime into the AppImage (`dist/`).
-- `ui/` — placeholder frontend required by Tauri (the app has no window).
+Building from source: see [DEVELOPMENT.md](DEVELOPMENT.md). Version history: [CHANGELOG.md](CHANGELOG.md).
 
-Each launch rewrites the profile's `user.js`, `userChrome.css` (hides toolbar/menus, window buttons on the right) and `policies.json`.
+## Install
+1. Download `Teams_for_Linux-x86_64.AppImage` (and the `.sha256` file) from the [latest release](https://github.com/community-artifacts/linux-teams/releases/latest).
+2. Optionally verify it: `sha256sum -c Teams_for_Linux-x86_64.AppImage.sha256`.
+3. Make it executable and run it:
+   ```bash
+   chmod +x Teams_for_Linux-x86_64.AppImage
+   ./Teams_for_Linux-x86_64.AppImage
+   ```
+
+Requirements: x86_64 Linux, `libfuse2` (to run AppImages) and `zenity` (for the tray's dialogs). On Ubuntu: `sudo apt install libfuse2 zenity`.
+
+On GNOME the tray icon needs the **AppIndicator and KStatusNotifierItem Support** extension. Without it the app still works, but there is no tray menu.
+
+## First run
+The first start sets up its own Firefox profile under `~/.local/share/teams-for-linux` and opens Teams. Sign in once; the session is kept. A "Microsoft Teams" entry is added to your applications, so you can pin it to the dock.
 
 ## Tray menu
-Show Teams · Accounts (switch / add / remove; names follow the signed-in email; single window; the default account is protected) · Launch on login · Start minimized (tray only) · Open logs · Reset all accounts · Quit.
+| Item | What it does |
+| --- | --- |
+| Show Teams | Opens Teams if it is closed. |
+| Accounts | Switch between accounts, **Add account…** or **Remove account…**. |
+| Launch on login | Starts the app when you log in. |
+| Start minimized (tray only) | At login, start only the tray; Teams opens on **Show Teams**. |
+| Open logs | Opens the log file. |
+| Reset all accounts… | Deletes all profiles and logins and starts fresh. |
+| Quit | Closes Teams and the tray. |
 
-## Prerequisites
-Tested on Ubuntu with GNOME on Wayland (x86_64).
+The tray icon changes when you have unread messages.
 
-1. **System packages**
-   ```bash
-   sudo apt install build-essential curl wget file patchelf zenity libfuse2 \
-     libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
-   ```
-2. **Rust and the Tauri CLI**
-   ```bash
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   cargo install tauri-cli --version "^2"
-   ```
-3. **firefoxpwa**, installed system-wide so that `/usr/bin/firefoxpwa`, `/usr/libexec/firefoxpwa-connector` and `/usr/share/firefoxpwa/userchrome` exist. Follow the [official install guide](https://pwasforfirefox.filips.si/user-guide/installation/) (a `.deb` or the apt repository).
-4. **A Firefox runtime for firefoxpwa** (the build copies it into the AppImage):
-   ```bash
-   firefoxpwa runtime install      # installs to ~/.local/share/firefoxpwa/runtime
-   ```
-   Use `SRC_RUNTIME=/path/to/runtime` if it lives elsewhere.
-5. **appimagetool** is downloaded to `~/.cache/teams-for-linux/appimagetool` on first build. Override with `APPIMAGETOOL=/path/to/appimagetool`.
-6. **GNOME only:** the *AppIndicator and KStatusNotifierItem Support* extension, or the tray icon will not appear.
+## Accounts
+- Only one Teams window is open at a time; switching accounts closes the current one and opens the other.
+- Each account has its own login and data.
+- Accounts are named after the email address they sign in with. A new account shows as "New account" until you sign in.
+- The first account ("Default") can't be removed. Use **Reset all accounts…** to wipe everything.
 
-## Build and run the AppImage
-```bash
-./scripts/build-appimage.sh
-./dist/Teams_for_Linux-x86_64.AppImage
-```
-The build needs network access (appimagetool and the Teams icon are downloaded). On first run the app copies the bundled runtime to `~/.local/share/teams-for-linux/runtime`, installs the Teams site and opens it; sign in once.
+## Notifications and links
+- Teams notifications are allowed automatically.
+- Links to other sites open in your default browser. Microsoft sign-in and Teams pages stay in the app.
 
-Stop any running copy before rebuilding; otherwise the old process keeps the single-instance lock and the new one exits silently (`pkill teams-tray`).
-
-## Releases
-Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds the AppImage on `ubuntu-22.04` (firefoxpwa pinned by `FIREFOXPWA_VERSION`) and publishes it with a `.sha256` file to GitHub Releases. The workflow can also be started manually to get the AppImage as a build artifact only. Bump `version` in `src-tauri/Cargo.toml` and `tauri.conf.json` before tagging.
-
-## Run from source (development)
-Without the AppImage there is no bundled runtime, so the app uses `firefoxpwa` from `PATH` (override with `FFPWA_BIN`):
-```bash
-firefoxpwa runtime install          # once; the app uses ~/.local/share/teams-for-linux, so copy it:
-mkdir -p ~/.local/share/teams-for-linux && cp -a ~/.local/share/firefoxpwa/runtime ~/.local/share/teams-for-linux/
-cd src-tauri && cargo run
-```
-Pass `--account <site-id>` to open a specific account, `--autostart` behaves like a login start.
-
-## Files and logs
+## Where files are kept
 | Path | Content |
 | --- | --- |
-| `~/.local/share/teams-for-linux/` | firefoxpwa data, runtime, profiles |
-| `.../labels.json` | account names (email) |
-| `.../teams-for-linux.log` | Firefox/Teams output (`Open logs` in the tray) |
-| `~/.local/share/applications/FFPWA-<site>.desktop` | dock/pinning entry per account |
-| `~/.config/autostart/` | "Launch on login" entry |
+| `~/.local/share/teams-for-linux/` | Profiles, logins, logs, account names |
+| `~/.local/share/applications/FFPWA-*.desktop` | Dock and menu entry per account |
+| `~/.config/autostart/teams-for-linux.desktop` | "Launch on login" |
 
-To start over, use **Reset all accounts…** in the tray, or delete `~/.local/share/teams-for-linux`.
+To uninstall, delete the AppImage and these paths.
 
 ## Troubleshooting
-- **App starts and exits immediately** — another instance is running: `pkill teams-tray`, then relaunch.
-- **No tray icon** — enable the AppIndicator GNOME extension.
-- **Unread badge stuck** — it depends on Teams putting `(N)` in the window title; look for `[tray] title=...` lines in the log.
-- **Build fails at `firefoxpwa` copy** — the paths in `scripts/build-appimage.sh` (`/usr/bin/firefoxpwa`, `/usr/libexec/firefoxpwa-connector`, `/usr/share/firefoxpwa/userchrome`) must exist; adjust them if your package installs elsewhere.
+- **Nothing happens when I start it** — it is probably already running (single instance). Use the tray icon or the dash icon, or run `pkill teams-tray` and start again.
+- **No tray icon** — enable the AppIndicator extension on GNOME.
+- **Unread badge doesn't update** — it only reflects the account that is open.
+- **Calendar asks me to sign in again** — report it with a screenshot; this is under investigation.
 
 ## Known limits
-- Wayland: the tray can't raise an existing window ("Show Teams" does nothing if it is already running; use the dash icon).
-- Switching accounts closes the previous account's process, so it gets no notifications.
-- The unread badge reports only the active account.
-- Screen-share picker comes from the desktop portal and can't be customised.
+- On Wayland the tray can't raise an already-open window: "Show Teams" does nothing in that case. Use the dash icon.
+- Switching accounts closes the previous one, so it gets no notifications while inactive.
+- The screen-share picker comes from your desktop and can't be customised.
