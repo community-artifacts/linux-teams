@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FIREFOXPWA_VERSION: 2.20.1
+  APPIMAGE_EXTRACT_AND_RUN: "1"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl wget file patchelf zenity libfuse2 \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install firefoxpwa
+        run: |
+          curl -fsSL -o firefoxpwa.deb \
+            "https://github.com/filips123/PWAsForFirefox/releases/download/v${FIREFOXPWA_VERSION}/firefoxpwa_${FIREFOXPWA_VERSION}_amd64.deb"
+          sudo apt-get install -y ./firefoxpwa.deb
+          firefoxpwa runtime install
+          test -d "$HOME/.local/share/firefoxpwa/runtime"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build AppImage
+        run: ./scripts/build-appimage.sh
+
+      - name: Checksum
+        run: |
+          cd dist
+          sha256sum Teams_for_Linux-x86_64.AppImage > Teams_for_Linux-x86_64.AppImage.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: dist/Teams_for_Linux-x86_64.AppImage*
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/Teams_for_Linux-x86_64.AppImage dist/Teams_for_Linux-x86_64.AppImage.sha256 \
+            --title "$GITHUB_REF_NAME" --generate-notes

@@ -44,6 +44,9 @@ The build needs network access (appimagetool and the Teams icon are downloaded).
 
 Stop any running copy before rebuilding; otherwise the old process keeps the single-instance lock and the new one exits silently (`pkill teams-tray`).
 
+## Releases
+Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds the AppImage on `ubuntu-22.04` (firefoxpwa pinned by `FIREFOXPWA_VERSION`) and publishes it with a `.sha256` file to GitHub Releases. The workflow can also be started manually to get the AppImage as a build artifact only. Bump `version` in `src-tauri/Cargo.toml` and `tauri.conf.json` before tagging.
+
 ## Run from source (development)
 Without the AppImage there is no bundled runtime, so the app uses `firefoxpwa` from `PATH` (override with `FFPWA_BIN`):
 ```bash
