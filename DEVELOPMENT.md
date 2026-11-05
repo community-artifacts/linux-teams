@@ -52,12 +52,17 @@ cd src-tauri && cargo run
 Flags: `--account <site-id>` opens a specific account; `--autostart` behaves like a login start.
 
 ## Releases
-Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`. It builds the AppImage on `ubuntu-22.04` (firefoxpwa pinned by `FIREFOXPWA_VERSION`) and publishes it with a `.sha256` file to GitHub Releases. Starting the workflow manually only uploads the AppImage as a build artifact.
+Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`:
+1. **Draft:** a draft release is created for the tag, with notes taken from the matching `CHANGELOG.md` section (or generated from commits if there is none).
+2. **Build:** the AppImage is built on `ubuntu-22.04` (firefoxpwa pinned by `FIREFOXPWA_VERSION`), and the AppImage and its `.sha256` are attached to the draft.
+3. **Publish:** only if the build succeeded and both files are attached, the draft is published and marked latest.
+
+A failed build leaves the release as a draft, so users never see a release without files. Starting the workflow manually only uploads the AppImage as a build artifact.
 
 To release:
 1. Bump `version` in `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`.
-2. Add an entry to `CHANGELOG.md`.
-3. Commit, then `git tag -a vX.Y.Z -m vX.Y.Z && git push origin main vX.Y.Z`.
+2. Add a `## [X.Y.Z] - date` entry to `CHANGELOG.md`.
+3. Commit, then `git tag -a vX.Y.Z -m vX.Y.Z && git push origin main vX.Y.Z`. Do not create the release by hand; the workflow does it.
 
 ## Debugging
 - Logs: `~/.local/share/teams-for-linux/teams-for-linux.log` (Firefox and Teams output, `[tray]` lines from `boot.sys.mjs`).
