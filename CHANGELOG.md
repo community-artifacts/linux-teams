@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] - 2026-11-05
+
+### Added
+- Unit tests (`cargo test`) for argument parsing, account listing, email-based naming, the tray listener's request parsing and the generated profile settings.
+- CI workflow that runs the checks on every pull request.
+- Development now goes through pull requests to a `develop` branch; releases are a pull request from `develop` to `main`.
+
+### Changed
+- The release pipeline reads the release notes from the matching `CHANGELOG.md` section.
+
 ## [0.1.1] - 2026-11-05
 
 Packaging and documentation release; the app itself is unchanged from 0.1.0.
@@ -43,4 +53,5 @@ First release: Microsoft Teams running through firefoxpwa, packaged as a single 
 - The unread badge reports only the active account.
 - The tray icon needs the AppIndicator extension on GNOME.
 
+[0.2.0]: https://github.com/community-artifacts/linux-teams/releases/tag/v0.2.0
 [0.1.1]: https://github.com/community-artifacts/linux-teams/releases/tag/v0.1.1
