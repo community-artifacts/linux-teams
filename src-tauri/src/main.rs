@@ -66,7 +66,10 @@ fn config() -> Option<serde_json::Value> {
 /// Every installed Teams site is one account; its profile name is the account name.
 fn accounts() -> Vec<Account> {
     let Some(cfg) = config() else { return vec![] };
-    let labels = load_labels();
+    account_list(&cfg, &load_labels())
+}
+
+fn account_list(cfg: &serde_json::Value, labels: &serde_json::Map<String, serde_json::Value>) -> Vec<Account> {
     let mut list: Vec<Account> = cfg["sites"]
         .as_object()
         .into_iter()
@@ -102,23 +105,30 @@ fn load_labels() -> serde_json::Map<String, serde_json::Value> {
 
 fn save_label(profile: &str, name: &str, email: Option<&str>) {
     let mut labels = load_labels();
+    set_label(&mut labels, profile, name, email);
+    let _ = fs::write(labels_path(), serde_json::Value::Object(labels).to_string());
+}
+
+fn set_label(labels: &mut serde_json::Map<String, serde_json::Value>, profile: &str, name: &str, email: Option<&str>) {
     let mut entry = labels.get(profile).cloned().unwrap_or_else(|| serde_json::json!({}));
     entry["name"] = name.into();
     if let Some(email) = email {
         entry["email"] = email.into();
     }
     labels.insert(profile.to_string(), entry);
-    let _ = fs::write(labels_path(), serde_json::Value::Object(labels).to_string());
+}
+
+/// Whether the account should take the signed-in address as its name: once per sign-in
+/// identity, and never when another account already has that name.
+fn should_rename(labels: &serde_json::Map<String, serde_json::Value>, accounts: &[Account], profile: &str, email: &str) -> bool {
+    labels.get(profile).and_then(|e| e["email"].as_str()) != Some(email)
+        && !accounts.iter().any(|a| a.profile != profile && a.name.eq_ignore_ascii_case(email))
 }
 
 /// Called with the address Teams is signed in with. The account is renamed to it once per
 /// sign-in identity, so the name always follows the signed-in address.
 fn account_signed_in(profile: &str, email: &str) {
-    let known = load_labels();
-    if known.get(profile).and_then(|e| e["email"].as_str()) == Some(email) {
-        return;
-    }
-    if accounts().iter().any(|a| a.profile != profile && a.name.eq_ignore_ascii_case(email)) {
+    if !should_rename(&load_labels(), &accounts(), profile, email) {
         return;
     }
     save_label(profile, email, Some(email));
@@ -423,6 +433,13 @@ fn set_unread(tray: &TrayIcon, count: u32) {
 /// Minimal HTTP endpoint: the extension POSTs the unread count as the request body.
 static ACCOUNTS_MENU: std::sync::OnceLock<Submenu<tauri::Wry>> = std::sync::OnceLock::new();
 
+/// Request path and trimmed body of a raw HTTP request.
+fn parse_request(req: &str) -> (String, String) {
+    let path = req.split_whitespace().nth(1).unwrap_or("").to_string();
+    let body = req.split("\r\n\r\n").nth(1).unwrap_or("").trim().to_string();
+    (path, body)
+}
+
 fn listen_for_unread(app: AppHandle) {
     thread::spawn(move || {
         let Ok(listener) = TcpListener::bind(("127.0.0.1", UNREAD_PORT)) else {
@@ -450,9 +467,7 @@ fn listen_for_unread(app: AppHandle) {
                     }
                 }
             }
-            let req = String::from_utf8_lossy(&req);
-            let path = req.split_whitespace().nth(1).unwrap_or("").to_string();
-            let body = req.split("\r\n\r\n").nth(1).unwrap_or("").trim().to_string();
+            let (path, body) = parse_request(&String::from_utf8_lossy(&req));
             let _ = stream.write_all(
                 b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nConnection: close\r\n\r\n",
             );
@@ -637,4 +652,134 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running teams-tray");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    fn labels(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        v.as_object().cloned().unwrap()
+    }
+
+    fn account(site: &str, profile: &str, name: &str) -> Account {
+        Account { site: site.into(), profile: profile.into(), name: name.into() }
+    }
+
+    #[test]
+    fn account_arg_reads_the_value_after_the_flag() {
+        assert_eq!(account_arg(&argv(&["teams-tray", "--account", "SITE1"])), Some("SITE1".into()));
+        assert_eq!(account_arg(&argv(&["teams-tray", "--autostart", "--account", "SITE2"])), Some("SITE2".into()));
+    }
+
+    #[test]
+    fn account_arg_is_none_without_a_value() {
+        assert_eq!(account_arg(&argv(&["teams-tray"])), None);
+        assert_eq!(account_arg(&argv(&["teams-tray", "--account"])), None);
+    }
+
+    fn sample_config() -> serde_json::Value {
+        json!({
+            "profiles": {
+                "00000000000000000000000000": { "name": "Default" },
+                "PROFILE_B": { "name": "Client A" }
+            },
+            "sites": {
+                "SITE_A": { "profile": "00000000000000000000000000", "config": { "document_url": TEAMS_DOCUMENT } },
+                "SITE_B": { "profile": "PROFILE_B", "config": { "document_url": TEAMS_DOCUMENT } },
+                "OTHER": { "profile": "PROFILE_B", "config": { "document_url": "https://example.com/" } }
+            }
+        })
+    }
+
+    #[test]
+    fn account_list_keeps_only_teams_sites_and_sorts_by_name() {
+        let list = account_list(&sample_config(), &labels(json!({})));
+        let names: Vec<_> = list.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["Client A", "Default"]);
+        assert!(list.iter().all(|a| a.site != "OTHER"));
+    }
+
+    #[test]
+    fn account_list_prefers_our_labels_over_the_firefoxpwa_profile_name() {
+        let l = labels(json!({ "PROFILE_B": { "name": "me@example.com", "email": "me@example.com" } }));
+        let list = account_list(&sample_config(), &l);
+        let b = list.iter().find(|a| a.site == "SITE_B").unwrap();
+        assert_eq!(b.name, "me@example.com");
+    }
+
+    #[test]
+    fn account_list_without_sites_is_empty() {
+        assert!(account_list(&json!({}), &labels(json!({}))).is_empty());
+    }
+
+    #[test]
+    fn set_label_creates_and_updates_entries() {
+        let mut l = labels(json!({}));
+        set_label(&mut l, "P", "me@example.com", Some("me@example.com"));
+        assert_eq!(l["P"], json!({ "name": "me@example.com", "email": "me@example.com" }));
+        // A name-only update keeps the stored email.
+        set_label(&mut l, "P", "Other", None);
+        assert_eq!(l["P"], json!({ "name": "Other", "email": "me@example.com" }));
+    }
+
+    #[test]
+    fn should_rename_only_once_per_sign_in_identity() {
+        let accounts = [account("S", "P", "Default")];
+        let empty = labels(json!({}));
+        assert!(should_rename(&empty, &accounts, "P", "me@example.com"));
+        let done = labels(json!({ "P": { "name": "me@example.com", "email": "me@example.com" } }));
+        assert!(!should_rename(&done, &accounts, "P", "me@example.com"));
+        // A different address signing in renames again.
+        assert!(should_rename(&done, &accounts, "P", "new@example.com"));
+    }
+
+    #[test]
+    fn should_rename_refuses_a_name_used_by_another_account() {
+        let accounts = [account("S1", "P1", "me@example.com"), account("S2", "P2", "New account")];
+        assert!(!should_rename(&labels(json!({})), &accounts, "P2", "ME@example.com"));
+        assert!(should_rename(&labels(json!({})), &accounts, "P1", "other@example.com"));
+    }
+
+    #[test]
+    fn parse_request_splits_path_and_body() {
+        let raw = "POST /account HTTP/1.1\r\nContent-Length: 20\r\n\r\nPROFILE\nme@example.com\n";
+        assert_eq!(parse_request(raw), ("/account".into(), "PROFILE\nme@example.com".into()));
+        assert_eq!(parse_request("POST /unread HTTP/1.1\r\n\r\n3"), ("/unread".into(), "3".into()));
+    }
+
+    #[test]
+    fn parse_request_tolerates_garbage() {
+        assert_eq!(parse_request(""), (String::new(), String::new()));
+        assert_eq!(parse_request("GET /x"), ("/x".into(), String::new()));
+    }
+
+    #[test]
+    fn policies_json_is_valid() {
+        let v: serde_json::Value = serde_json::from_str(POLICIES_JSON).unwrap();
+        assert_eq!(v["policies"]["DisableTelemetry"], true);
+    }
+
+    #[test]
+    fn user_js_only_contains_user_pref_lines() {
+        for line in USER_JS.lines().filter(|l| !l.trim().is_empty()) {
+            assert!(line.starts_with("user_pref(\"") && line.ends_with(");"), "bad line: {line}");
+        }
+    }
+
+    #[test]
+    fn user_js_does_not_disable_screen_share_previews() {
+        assert!(!USER_JS.contains("getdisplaymedia.previews"));
+    }
+
+    #[test]
+    fn boot_script_reports_to_the_port_the_tray_listens_on() {
+        assert!(BOOT_JS.contains(&format!("127.0.0.1:{UNREAD_PORT}")));
+        assert!(BOOT_JS.contains("/account"));
+    }
 }
