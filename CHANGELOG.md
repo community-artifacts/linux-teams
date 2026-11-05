@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.1] - 2026-11-05
+
+Packaging and documentation release; the app itself is unchanged from 0.1.0.
+
+### Added
+- `install.sh`: one-line installer that installs the prerequisites, downloads the latest AppImage, verifies its checksum and starts the app.
+- Release pipeline: a draft release is created, the AppImage and checksum are attached by GitHub Actions, then the release is published automatically.
+- `DEVELOPMENT.md` for building and releasing; the README is now a usage guide.
+
+### Fixed
+- AppImage repacking failed in CI because the app folder was not readable for all users.
+
 ## [0.1.0] - 2026-10-30
 
 First release: Microsoft Teams running through firefoxpwa, packaged as a single AppImage with a tray menu.
@@ -31,4 +43,5 @@ First release: Microsoft Teams running through firefoxpwa, packaged as a single 
 - The unread badge reports only the active account.
 - The tray icon needs the AppIndicator extension on GNOME.
 
+[0.1.1]: https://github.com/community-artifacts/linux-teams/releases/tag/v0.1.1
 [0.1.0]: https://github.com/community-artifacts/linux-teams/releases/tag/v0.1.0

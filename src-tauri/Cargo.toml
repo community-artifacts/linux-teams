@@ -1,6 +1,6 @@
 [package]
 name = "teams-tray"
-version = "0.1.0"
+version = "0.1.1"
 description = "Tray launcher for Microsoft Teams running as a firefoxpwa web app"
 edition = "2021"
 
