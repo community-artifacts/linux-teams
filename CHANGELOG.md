@@ -14,7 +14,7 @@ Packaging and documentation release; the app itself is unchanged from 0.1.0.
 ### Fixed
 - AppImage repacking failed in CI because the app folder was not readable for all users.
 
-## [0.1.0] - 2026-10-30
+## 0.1.0 - 2026-10-30
 
 First release: Microsoft Teams running through firefoxpwa, packaged as a single AppImage with a tray menu.
 
@@ -44,4 +44,3 @@ First release: Microsoft Teams running through firefoxpwa, packaged as a single 
 - The tray icon needs the AppIndicator extension on GNOME.
 
 [0.1.1]: https://github.com/community-artifacts/linux-teams/releases/tag/v0.1.1
-[0.1.0]: https://github.com/community-artifacts/linux-teams/releases/tag/v0.1.0

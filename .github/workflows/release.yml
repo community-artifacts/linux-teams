@@ -36,7 +36,7 @@ jobs:
           # Notes come from the matching CHANGELOG.md section, else from the commit log.
           awk -v v="${tag#v}" '
             $0 ~ "^## \\[" v "\\]" { on=1; next }
-            on && /^## \[/ { exit }
+            on && /^## / { exit }
             on { print }
           ' CHANGELOG.md > notes.md
           if [ -s notes.md ]; then
