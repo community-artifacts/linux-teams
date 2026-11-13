@@ -2,10 +2,10 @@
 
 use std::{
     fs,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
     path::PathBuf,
-    process::Command,
+    process::{Command, Stdio},
     thread,
 };
 
@@ -28,6 +28,22 @@ fn data_dir() -> PathBuf {
 
 fn log_path() -> PathBuf {
     data_dir().join("teams-for-linux.log")
+}
+
+/// `line` prefixed with the local date and time, as written to the log.
+fn stamped(now: chrono::DateTime<chrono::Local>, line: &str) -> String {
+    format!("{} {line}\n", now.format("%Y-%m-%d %H:%M:%S"))
+}
+
+/// Copies a child's output into the log, one dated line at a time.
+fn log_with_timestamps(stream: impl Read + Send + 'static) {
+    thread::spawn(move || {
+        let Ok(mut log) = fs::OpenOptions::new().create(true).append(true).open(log_path()) else { return };
+        for line in BufReader::new(stream).split(b'\n').flatten() {
+            let text = String::from_utf8_lossy(&line);
+            let _ = log.write_all(stamped(chrono::Local::now(), text.trim_end_matches('\r')).as_bytes());
+        }
+    });
 }
 
 fn autostart_path() -> PathBuf {
@@ -250,15 +266,18 @@ fn launch(wanted: Option<String>) {
             write_policies();
             apply_profile_tweaks(&id);
             install_desktop_entry(&id);
-            let log = fs::OpenOptions::new().create(true).append(true).open(log_path());
             let mut cmd = ffpwa(&["site", "launch", &id]);
-            if let Ok(log) = log {
-                if let Ok(err) = log.try_clone() {
-                    cmd.stdout(log).stderr(err);
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    if let Some(out) = child.stdout.take() {
+                        log_with_timestamps(out);
+                    }
+                    if let Some(err) = child.stderr.take() {
+                        log_with_timestamps(err);
+                    }
                 }
-            }
-            if let Err(e) = cmd.spawn() {
-                eprintln!("launch failed: {e}");
+                Err(e) => eprintln!("launch failed: {e}"),
             }
         }
         Err(e) => eprintln!("{e}"),
@@ -757,6 +776,13 @@ mod tests {
     fn parse_request_tolerates_garbage() {
         assert_eq!(parse_request(""), (String::new(), String::new()));
         assert_eq!(parse_request("GET /x"), ("/x".into(), String::new()));
+    }
+
+    #[test]
+    fn stamped_prefixes_the_local_date_and_time() {
+        use chrono::TimeZone;
+        let now = chrono::Local.with_ymd_and_hms(2026, 11, 13, 9, 5, 7).unwrap();
+        assert_eq!(stamped(now, "[tray] title=Teams"), "2026-11-13 09:05:07 [tray] title=Teams\n");
     }
 
     #[test]
