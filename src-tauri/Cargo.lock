@@ -3626,6 +3626,7 @@ dependencies = [
 name = "teams-tray"
 version = "0.2.0"
 dependencies = [
+ "chrono",
  "dirs 5.0.1",
  "serde_json",
  "tauri",
